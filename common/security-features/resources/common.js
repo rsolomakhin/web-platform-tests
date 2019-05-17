@@ -425,7 +425,8 @@ function requestViaIframe(url, additionalAttributes) {
       false);
   return bindEvents2(window, "message", iframe, "error", window, "error")
       .then(event => {
-          assert_equals(event.source, iframe.contentWindow);
+          if (event.source !== iframe.contentWindow)
+            return Promise.reject(new Error('Unexpected event.source'));
           return event.data;
         });
 }
@@ -570,8 +571,7 @@ function get_worklet(type) {
   if (type == 'audio')
     return new OfflineAudioContext(2,44100*40,44100).audioWorklet;
 
-  assert_unreached('unknown worklet type is passed.');
-  return undefined;
+  throw new Error('unknown worklet type is passed.');
 }
 
 function requestViaWorklet(type, url) {
@@ -599,7 +599,8 @@ function requestViaNavigable(navigableElement, url) {
   const promise =
     bindEvents2(window, "message", iframe, "error", window, "error")
       .then(event => {
-          assert_equals(event.source, iframe.contentWindow, "event.source");
+          if (event.source !== iframe.contentWindow)
+            return Promise.reject(new Error('Unexpected event.source'));
           return event.data;
         });
   navigableElement.click();
@@ -923,11 +924,6 @@ const subresourceMap = {
     invoker: url =>
         requestViaDedicatedWorker(workerUrlThatImports(url), {type: "module"}),
   },
-  "classic-data-worker-fetch": {
-    path: "/common/security-features/subresource/empty.py",
-    invoker: url =>
-        requestViaDedicatedWorker(dedicatedWorkerUrlThatFetches(url), {}),
-  },
   "shared-worker": {
     path: "/common/security-features/subresource/shared-worker.py",
     invoker: requestViaSharedWorker,
@@ -1063,11 +1059,31 @@ function invokeRequest(subresource, sourceContextList) {
     "iframe": { // <iframe src="same-origin-URL"></iframe>
       invoker: invokeFromIframe,
     },
+    "classic-worker": {
+      // Classic dedicated worker loaded from same-origin.
+      invoker: invokeFromWorker.bind(undefined, false, {}),
+    },
+    "classic-data-worker": {
+      // Classic dedicated worker loaded from data: URL.
+      invoker: invokeFromWorker.bind(undefined, true, {}),
+    },
+    "module-worker": {
+      // Module dedicated worker loaded from same-origin.
+      invoker: invokeFromWorker.bind(undefined, false, {type: 'module'}),
+    },
+    "module-data-worker": {
+      // Module dedicated worker loaded from data: URL.
+      invoker: invokeFromWorker.bind(undefined, true, {type: 'module'}),
+    },
   };
 
   return sourceContextMap[sourceContextList[0].sourceContextType].invoker(
       subresource, sourceContextList);
 }
+
+// Quick hack to expose invokeRequest when common.js is loaded either
+// as a classic or module script.
+self.invokeRequest = invokeRequest;
 
 /**
   invokeFrom*() functions are helper functions with the same parameters
@@ -1076,6 +1092,51 @@ function invokeRequest(subresource, sourceContextList) {
   For example, invokeFromIframe() is the helper function for the cases where
   sourceContextList[0] is an iframe.
 */
+
+/**
+  @param {boolean} isDataUrl
+    true if the worker script is loaded from data: URL.
+    Otherwise, the script is loaded from same-origin.
+  @param {object} workerOptions
+    The `options` argument for Worker constructor.
+
+  Other parameters and return values are the same as those of invokeRequest().
+*/
+function invokeFromWorker(isDataUrl, workerOptions,
+                          subresource, sourceContextList) {
+  const currentSourceContext = sourceContextList.shift();
+  let workerUrl =
+    "/common/security-features/scope/worker.py?policyDeliveries=" +
+    encodeURIComponent(JSON.stringify(
+        currentSourceContext.policyDeliveries || []));
+  if (workerOptions.type === 'module') {
+    workerUrl += "&type=module";
+  }
+
+  let promise;
+  if (isDataUrl) {
+    promise = fetch(workerUrl)
+      .then(r => r.text())
+      .then(source => {
+          return 'data:text/javascript;base64,' + btoa(source);
+        });
+  } else {
+    promise = Promise.resolve(workerUrl);
+  }
+
+  return promise
+    .then(url => {
+      const worker = new Worker(url, workerOptions);
+      worker.postMessage({subresource: subresource,
+                          sourceContextList: sourceContextList});
+      return bindEvents2(worker, "message", worker, "error", window, "error");
+    })
+    .then(event => {
+        if (event.data.error)
+          return Promise.reject(event.data.error);
+        return event.data;
+      });
+}
 
 function invokeFromIframe(subresource, sourceContextList) {
   const currentSourceContext = sourceContextList.shift();
