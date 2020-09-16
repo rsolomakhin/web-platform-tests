@@ -42,6 +42,9 @@ For example, on most UNIX-like systems, you can setup the hosts file with:
 
 ```bash
 ./wpt make-hosts-file | sudo tee -a /etc/hosts
+
+# after the test, you can restore your hosts file with
+sudo perl -pi -e 's/^127\.0\.0\.1\t[\w.-]*web-platform\.test\n//' /etc/hosts
 ```
 
 And on Windows (this must be run in a PowerShell session with Administrator privileges):
